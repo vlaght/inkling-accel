@@ -15,13 +15,13 @@ Reproduce with `scripts/results-table.py`.
 
 | | decode tok/s (8-prompt mean) | prompt tok/s (6k prompt) |
 |---|---|---|
-| llama.cpp CUDA (patches switched off), the baseline | 65.3 | 518 |
+| llama.cpp CUDA (patches switched off), the baseline | 65.3 (0 %) | 518 (0 %) |
 | CUDA + patches | **82.5** (+26.3 %) | **568** (+9.7 %) |
 | CUDA + patches + DSpark | **101.7** (+55.7 %) | 545 (+5.2 %) |
 
 Percentages are against the CUDA baseline row (llama.cpp with the patches switched off).
 
-Peak decode with `llama-bench` (`-ub 512`, f16 KV, no server) is 88.0 tok/s patched against 67.4 unpatched; with a larger micro-batch the server reads prompts faster too
+Peak decode with `llama-bench` (`-ub 512`, f16 KV, no server) is 88.0 tok/s patched against 67.4 unpatched (+30.6 %); with a larger micro-batch the server reads prompts faster too
 (688 tok/s at `-ub 128`, `docs/experiments.md` 5.7). The small micro-batch is what lets a 65k to 131k context fit.
 
 Quality: KL divergence against the unfused run is 0.0049, the same as the engine's own noise (0.0044 to 0.0047 when only the micro-batch changes).
