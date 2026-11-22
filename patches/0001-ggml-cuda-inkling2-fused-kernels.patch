@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 3e1f167..e64d4b4 100644
+index 3e1f167..ac11552 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -95,7 +95,6 @@
@@ -89,7 +89,7 @@ index 3e1f167..e64d4b4 100644
          }
  
          // DIV <- CLAMP, RESHAPE
-@@ -4466,6 +4488,997 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
+@@ -4466,6 +4488,1114 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
  }
  
  // try and fuse nodes and return the number of nodes to skip
@@ -621,6 +621,102 @@ index 3e1f167..e64d4b4 100644
 +    }
 +}
 +
++
++// Single-kernel mix_attn (bit 131072): one 256-thread block per token computes RMS_NORM + dot products + softmax +
++// weighted sum directly into dst with only 2 __syncthreads() barriers (no xn write, no k_inkling_mix_out launch).
++template <int NQ>
++static __global__ void k_inkling_mix_single(
++        const ggml_inkling_rows rows, const size_t nb2, const float * __restrict__ q, float * __restrict__ dst,
++        const int B, const int ncols, const float eps, const float sm_scale) {
++    __shared__ float s_red[16][8];
++    __shared__ float s_dot[16][NQ][8];
++    __shared__ float s_ws[NQ][16];
++
++    const int t      = blockIdx.x;
++    const int tid    = threadIdx.x; // 0..255
++    const int warp   = tid >> 5;    // 0..7
++    const int lane   = tid & 31;    // 0..31
++    const int ncols4 = ncols >> 2;
++
++    // Pass 1: accumulate sum_sq and dot(x[b], q[j]) for all b without any block barrier
++    for (int b = 0; b < B; ++b) {
++        const float4 * xc = (const float4 *) (rows.p[b] + (size_t) t * nb2);
++        float sum_sq = 0.0f;
++        float d[NQ];
++#pragma unroll
++        for (int j = 0; j < NQ; ++j) d[j] = 0.0f;
++
++        for (int k = tid; k < ncols4; k += 256) {
++            const float4 xs = xc[k];
++            sum_sq += xs.x*xs.x + xs.y*xs.y + xs.z*xs.z + xs.w*xs.w;
++#pragma unroll
++            for (int j = 0; j < NQ; ++j) {
++                const float4 qv = ((const float4 *) (q + (int64_t) j * ncols))[k];
++                d[j] += xs.x*qv.x + xs.y*qv.y + xs.z*qv.z + xs.w*qv.w;
++            }
++        }
++        sum_sq = warp_reduce_sum(sum_sq);
++        if (lane == 0) s_red[b][warp] = sum_sq;
++#pragma unroll
++        for (int j = 0; j < NQ; ++j) {
++            d[j] = warp_reduce_sum(d[j]);
++            if (lane == 0) s_dot[b][j][warp] = d[j];
++        }
++    }
++    __syncthreads();
++
++    // Reduce across the 8 warps and compute softmax weights * rms_scale in warp 0
++    if (warp == 0 && lane < NQ) {
++        float sc[16];
++        float scores[16];
++        float m = -INFINITY;
++        for (int b = 0; b < B; ++b) {
++            float v = 0.0f, dj = 0.0f;
++#pragma unroll
++            for (int w = 0; w < 8; ++w) {
++                v  += s_red[b][w];
++                dj += s_dot[b][lane][w];
++            }
++            sc[b] = rsqrtf(v / ncols + eps);
++            scores[b] = (dj * sc[b]) * sm_scale;
++            m = fmaxf(m, scores[b]);
++        }
++        float sum = 0.0f;
++        for (int b = 0; b < B; ++b) {
++            const float ev = expf(scores[b] - m);
++            scores[b] = ev;
++            sum += ev;
++        }
++        const float inv_sum = 1.0f / sum;
++        for (int b = 0; b < B; ++b) {
++            s_ws[lane][b] = (scores[b] * inv_sum) * sc[b];
++        }
++    }
++    __syncthreads();
++
++    // Pass 2: weighted sum directly into dst
++    for (int k = tid; k < ncols4; k += 256) {
++        float4 o[NQ];
++#pragma unroll
++        for (int j = 0; j < NQ; ++j) o[j] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
++        for (int b = 0; b < B; ++b) {
++            const float4 xs = ((const float4 *) (rows.p[b] + (size_t) t * nb2))[k];
++#pragma unroll
++            for (int j = 0; j < NQ; ++j) {
++                const float w = s_ws[j][b];
++                o[j].x += xs.x * w;
++                o[j].y += xs.y * w;
++                o[j].z += xs.z * w;
++                o[j].w += xs.w * w;
++            }
++        }
++#pragma unroll
++        for (int j = 0; j < NQ; ++j) {
++            ((float4 *) (dst + ((int64_t) t * NQ + j) * ncols))[k] = o[j];
++        }
++    }
++}
++
 +static bool ggml_cuda_fuse_inkling_mix_attn(ggml_backend_cuda_context * cuda_ctx, const ggml_cgraph * cgraph, int i) {
 +    static const bool disabled = getenv("OOT2_NOFUSE") != nullptr || (ggml_cuda_inkling_nofuse_mask() & 512);
 +    if (disabled || cgraph->nodes[i]->op != GGML_OP_CONCAT || ggml_get_op_params_i32(cgraph->nodes[i], 0) != 1) {
@@ -679,6 +775,27 @@ index 3e1f167..e64d4b4 100644
 +    // the kernels read the stack and the scores after writing them: the result must not lie on either, nor the scores on the queries
 +    if (!ggml_inkling_disjoint(dst, xnn) || !ggml_inkling_disjoint(dst, n[m + 4]) || !ggml_inkling_disjoint(n[m + 4], qv) || !ggml_inkling_disjoint(xnn, qv)) {
 +        return false;
++    }
++    static const bool no_single = getenv("OOT2_NOFUSE") != nullptr || (ggml_cuda_inkling_nofuse_mask() & 131072);
++    if (!no_single) {
++        bool dst_ok = true;
++        for (int r = 0; r <= m; ++r) {
++            const ggml_tensor * v = r == m ? n[0]->src[1] : n[m - r - 1]->src[0];
++            if (!(NQ == 1 ? ggml_cuda_inkling_same_or_disjoint(dst, v) : ggml_inkling_disjoint(dst, v))) {
++                dst_ok = false;
++                break;
++            }
++        }
++        if (dst_ok && ((uintptr_t) dst->data) % 16 == 0) {
++            switch (NQ) {
++                case 1: k_inkling_mix_single<1><<<T, 256, 0, cuda_ctx->stream()>>>(rows, nb2, (const float *) qv->data, (float *) dst->data, B, ncols, eps, sm_scale); break;
++                case 2: k_inkling_mix_single<2><<<T, 256, 0, cuda_ctx->stream()>>>(rows, nb2, (const float *) qv->data, (float *) dst->data, B, ncols, eps, sm_scale); break;
++                case 3: k_inkling_mix_single<3><<<T, 256, 0, cuda_ctx->stream()>>>(rows, nb2, (const float *) qv->data, (float *) dst->data, B, ncols, eps, sm_scale); break;
++                case 4: k_inkling_mix_single<4><<<T, 256, 0, cuda_ctx->stream()>>>(rows, nb2, (const float *) qv->data, (float *) dst->data, B, ncols, eps, sm_scale); break;
++            }
++            CUDA_CHECK(cudaGetLastError());
++            return true;
++        }
 +    }
 +    k_inkling_mix_dots<<<dim3(B, T, 1), 1024, 0, cuda_ctx->stream()>>>(rows, nb2, (float *) xnn->data, (const float *) qv->data, (float *) n[m + 4]->data, B, ncols, NQ, eps, sm_scale);
 +    CUDA_CHECK(cudaGetLastError());
@@ -1087,7 +1204,7 @@ index 3e1f167..e64d4b4 100644
  static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
  
      if (ggml_cuda_fusion_disabled()) {
-@@ -4576,7 +5589,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4576,7 +5706,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
  
                  if (args.norm) {
                      ops.insert(ops.end(),
@@ -1096,7 +1213,7 @@ index 3e1f167..e64d4b4 100644
                      clamp = cgraph->nodes[i + ops.size() - 3];
                  }
                  if (args.scale) {
-@@ -5307,6 +6320,62 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -5307,6 +6437,62 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
          return 2;
      }
  
@@ -1159,7 +1276,7 @@ index 3e1f167..e64d4b4 100644
      return 0;
  }
  
-@@ -5347,6 +6416,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5347,6 +6533,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
          }
      };
  
@@ -1168,7 +1285,7 @@ index 3e1f167..e64d4b4 100644
      while (!graph_evaluated_or_captured) {
          // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
          // With the use of CUDA graphs, the execution will be performed by the graph launch.
-@@ -5475,6 +6546,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5475,6 +6663,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                              nodes_to_skip + 1, ggml_op_name(node->op), node->name,
                              ggml_op_name(cgraph->nodes[last_fused]->op), cgraph->nodes[last_fused]->name);
  #endif
@@ -1180,7 +1297,7 @@ index 3e1f167..e64d4b4 100644
                      i += nodes_to_skip;
                      continue;
                  }
-@@ -5500,6 +6576,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5500,6 +6693,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                      GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
                  }
                  GGML_ASSERT(ok);
@@ -1188,7 +1305,7 @@ index 3e1f167..e64d4b4 100644
  
                  if (!is_concurrent_event_active) {
                      try_launch_concurrent_event(node);
-@@ -5778,7 +6855,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
+@@ -5778,7 +6972,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
  
                          if (args.norm) {
                              ops.insert(ops.end(),
