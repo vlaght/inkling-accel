@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """The README results table, every row measured with the same server arguments, the same 8 prompts and the same 6k-token prompt.
 
-    results-table.py [VULKAN_ROOT]    # VULKAN_ROOT: a llama.cpp tree with a Vulkan build in build/ (the first row is skipped without it)
+    results-table.py
 
 Decode: mean tok/s over the 8 greedy 256-token answers. Prompt: tok/s on a fresh 6k-token prompt. Percentages are against the CUDA row with the fusions off. Common arguments: -c 32768 -ub 32 -b 32, 4-bit KV cache.
 """
-import os, sys
 import lib
 
 COMMON = "-c 32768 -ub 32 -b 32 -ctk q4_0 -ctv q4_0"
 ROWS = [("CUDA, stock behaviour (fusions off)", COMMON, {"OOT2_NOFUSE": "1"}, {}),
         ("CUDA + patches", COMMON, {}, {}),
         ("CUDA + patches + DSpark", f"-c 32768 -ub 32 -b 32 {lib.SPEC}", {}, {})]
-if len(sys.argv) > 1:
-    ROWS.insert(0, ("Vulkan", COMMON, {}, {"root": os.path.expanduser(sys.argv[1]), "build": "build", "host": True}))
 
 print("| row | decode tok/s (8-prompt mean) | prompt tok/s (6k prompt) |\n|---|---|---|")
 res = []
