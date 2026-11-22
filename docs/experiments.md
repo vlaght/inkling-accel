@@ -41,9 +41,13 @@ Gain is decode tok/s measured with only the named fusion added to the previous s
 | 2.8 | `mix_attn` | `CONCAT` chain, `RMS_NORM`, `TRANSPOSE`, `CONT`, `REPEAT`, `MUL_MAT`, `SOFT_MAX`, `MUL_MAT` as 2 kernels | 79.75 to 84.07 (+5.4 %); also prompt 1896 to 2163 (+14 %) once extended to several tokens | no (sum order) | kept |
 | 2.9 | `control_tail` | 2 mat-vecs, 2 `TANH`, 2 `MUL`, `SUB`, `ADD` of a loop controller | 84.15 to 86.35 (+2.6 %) | no (sum order) | kept, only for up to 8 tokens |
 | 2.10 | `gate_build` | 2 norms + concat that build the controller gate | 86.3 to 88.0 (+2 %) | no (sum order) | kept |
+| 2.11 | `rel_bias_mask` | `PAD, MUL_MAT, RESHAPE, SUB, PERMUTE, CONT, GET_ROWS, RESHAPE, PERMUTE, CONT, CPY, ADD, CPY` (rel-pos bias + sink + F16 mask; 9 kernels per layer) | 88.0 to 92.5 (+5.1 %); prompt 2237 to 2823 (+26.2 %) | no (sum order) | kept |
+| 2.12 | `conv_dyn_add_scale` | full-attention dynamic `convolve()`: `SSM_CONV` + 4 dynamic lag taps + `ADD` + `SCALE` (15 kernels per call) | 92.5 to 94.5 (+2.1 %); prompt 2823 to 2836 (+0.5 %) | yes | kept |
+| 2.13 | `q8_1_cache` | 4-slot device cache for `quantize_row_q8_1_cuda` (avoids re-quantizing shared F32 activations; cuts `quantize_q8_1` from 390 to 265 launches/tok) | 94.5 to 95.5 (+1.2 %) | yes | kept |
+| 2.14 | `mmvq_scale_only` | scale-only `mul_mat_vec_q` template mode (no `tmp_gate` / `tmp_shared_gate` overhead) + allow `MUL_MAT_ID` expert-scale fusion on all quantized types and fix `ncols` check | 95.5 to 97.4 (+1.9 %) | yes | kept |
 
-Cumulative decode (`llama-bench`): 67.4, 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10).
-Launches per token: 7,258 without the patches, 3,911 with them (-46 %); kernel time 14.7 to 11.4 ms.
+Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14).
+Launches per token: 7,258 without the patches, 3,051 with them (-58 %); kernel time 14.8 to 10.2 ms.
 
 Dropped or fixed along the way:
 
@@ -54,6 +58,7 @@ Dropped or fixed along the way:
 | 2.13 | Fuse the MoE weighted reduction (`MUL, MUL, VIEW x8, ADD x7`) | llama.cpp already fuses it (`ggml_cuda_match_moe_weighted_reduction`); the version here never ran | dropped (duplicate) |
 | 2.14 | `control_tail` for any number of tokens | prompt speed fell 11 % (each token re-reads both matrices) | limited to 8 tokens |
 | 2.15 | First `cat_rms` (norm + concat of the controller gate) | **never fired**: the message copy is read a second time by the controller tail, and a fused chain may not swallow a node that is read outside it. The kernel list of the profile had no such kernel, and the gain credited to it had come from other fusions | replaced by `gate_build`, which writes that copy itself |
+| 2.16 | Fuse `MUL_MAT_ID` expert scales via existing `has_fusion=true` path in `mul_mat_vec_q` | decode fell 95.55 to 94.23 (-1.4 %): `has_fusion=true` allocates `tmp_gate` registers and `tmp_shared_gate` shared memory even when `gate == nullptr`, adding ~4.6 us per mat-vec | replaced by 2.14 (`fusion_mode=1`, scale-only) |
 
 Debugging note: when checking a fused kernel against a host reference, copy the inputs to the host before launching it. The allocator may place a result on dead
 inputs, and reading them afterwards shows false errors (this produced a bogus relative error of 0.4 once). The fused `mix_attn` matches a double-precision
@@ -72,7 +77,9 @@ Mean KL divergence against the unfused run, 12 chunks of 512 tokens, prompt path
 | `mix_attn` alone | 0.0046 | 97.2 % |
 | `clip` alone | 0.0047 | 97.2 % |
 | `control_tail` alone, micro-batch 1 and 3 | 0.0005 | 99.3 to 99.6 % |
-| all fusions | 0.0049 | 96.7 % |
+| `conv_dyn_add_scale`, `q8_1_cache`, `mmvq_scale_only` alone | 0 | 100 % |
+| `rel_bias_mask` alone (prompt / decode) | 0 / 0.0021 | 100 % / 98.4 % |
+| all fusions (prompt / decode) | 0.0033 / 0.0023 | 97.7 % / 98.4 % |
 
 The model amplifies float differences of about 1e-7 to a KLD of a few 1e-3, which the unfused engine also shows when only the batch size changes. The fusions
 therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfused: 4.0842 vs 4.0802 (prompt path, 40 chunks, error +-0.09) and 3.9608 vs 3.9554
@@ -116,6 +123,6 @@ Not run; judged from their documentation.
 
 ## 7. Open ideas
 
-Each is estimated at 1 to 3 %: sharing the `q8_1` quantization of an activation between mat-vecs that read it (about 385 quantize launches per token), merging the
+Each is estimated at 1 to 3 %: merging the
 gain and forget matrices of the controllers into one mat-vec, fusing the small F32 mat-vecs (about 330 launches per token at about 2.8 µs), and a persistent
 kernel for a whole layer visit.

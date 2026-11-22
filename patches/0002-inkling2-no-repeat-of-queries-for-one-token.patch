@@ -1,5 +1,5 @@
 diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
-index e035d1a..25cd8d1 100644
+index e035d1a..e3699c2 100644
 --- a/src/models/inkling2.cpp
 +++ b/src/models/inkling2.cpp
 @@ -182,7 +182,9 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
@@ -13,3 +13,25 @@ index e035d1a..25cd8d1 100644
  
      ggml_tensor * scores = ggml_mul_mat(ctx0, states, queries);
      scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
+@@ -212,6 +214,10 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
+ 
+     build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
+ 
++    if (dynamic) {
++        ggml_build_forward_expand(gf, dynamic);
++    }
++
+     ggml_tensor * out = ggml_ssm_conv(ctx0, x, weight);
+     out = ggml_reshape_2d(ctx0, out, n_channels, n_tokens);
+ 
+@@ -353,6 +359,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+ 
+         ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, inputs[0]);
+ 
++        // expand Rcur and sinks before PAD so the entire rel-bias + mask chain is contiguous for fusion
++        ggml_build_forward_expand(gf, Rcur);
++        ggml_build_forward_expand(gf, sinks);
++
+         // project r on the bias table first, then gather by distance: only the gathered bias is n_kv x n_tokens x n_head
+         ggml_tensor * table = ggml_mul_mat(ctx0, ggml_pad(ctx0, layer.attn_rel_bias, 0, 1, 0, 0), Rcur);
+ 

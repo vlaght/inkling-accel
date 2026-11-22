@@ -24,12 +24,15 @@ KLD_DIR = os.path.join(lib.WORK, "kld")
 
 # name -> bit of OOT2_NOFUSE_MASK (the bit DISABLES the fusion)
 FUSIONS = {"clip": 1, "tanh_fma": 2, "gate_build": 4, "situ": 16, "conv_add_scale": 64, "concat_cpy": 128,
-           "gather_rms": 256, "mix_attn": 512, "control_tail": 1024}
+           "gather_rms": 256, "mix_attn": 512, "control_tail": 1024, "rel_bias_mask": 2048,
+           "conv_dyn_add_scale": 4096, "q8_1_cache": 8192, "mmvq_scale_only": 16384}
 ALL_OFF = sum(FUSIONS.values())
 # the kernel each fusion launches, to spot a fusion that never fires
 KERNELS = {"clip": "k_inkling_clip", "tanh_fma": "k_inkling_tanh_fma", "gate_build": "k_inkling_gate_build", "situ": "k_inkling_situ",
            "conv_add_scale": "k_inkling_conv_add_scale", "concat_cpy": "k_inkling_concat_cpy", "gather_rms": "k_inkling_gather_rms",
-           "mix_attn": "k_inkling_mix_dots", "control_tail": "k_inkling_control_tail"}
+           "mix_attn": "k_inkling_mix_dots", "control_tail": "k_inkling_control_tail",
+           "rel_bias_mask": "k_inkling_rel_bias_mask", "conv_dyn_add_scale": "k_inkling_conv_dyn_add_scale",
+           "mmvq_scale_only": "mul_mat_vec_q<(ggml_type)40, (int)1, (int)1"}
 
 
 def check_bits():
