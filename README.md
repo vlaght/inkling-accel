@@ -16,7 +16,9 @@ RTX 4070 Ti SUPER 16 GB (Ada), CUDA 13.4, model `Inkling-2-Mini-UD-IQ3_XXS`, one
 | llama.cpp Vulkan | 52.8 | 1439 |
 | llama.cpp CUDA | 67.4 | 1901 |
 | CUDA + patches | **88.0** | **2181** |
-| CUDA + patches + DSpark (server, 8-prompt mean; 91.9 with the patches off) | **102.0** (code about 103, JSON about 97, prose about 90) | |
+| CUDA + patches + DSpark (server, 8-prompt mean; 91.9 with the patches off) | **102.0** (code about 103, JSON about 97, prose about 90) | 544 (6k-token prompt, `-ub 32`) |
+
+The server row reads prompts more slowly than `llama-bench` because the server runs with a small micro-batch (`-ub 32`), which is what lets a 65k to 131k context fit: 221 tok/s at `-ub 8`, 482 at 32, 688 at 128 (`docs/experiments.md`, 5.7).
 
 Quality: KL divergence against the unfused run is 0.0049, the same as the engine's own noise (0.0044 to 0.0047 when only the micro-batch changes).
 
