@@ -1,0 +1,15 @@
+diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
+index e035d1a..25cd8d1 100644
+--- a/src/models/inkling2.cpp
++++ b/src/models/inkling2.cpp
+@@ -182,7 +182,9 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
+     }
+     states = ggml_rms_norm(ctx0, states, 1e-6f);
+ 
+-    ggml_tensor * queries = ggml_repeat(ctx0, query, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd, query->ne[1], n_tokens));
++    // one token: the queries need no copy per token (a reshape is a view; the repeat is a kernel, 120 a token)
++    ggml_tensor * queries = n_tokens == 1 ? ggml_reshape_3d(ctx0, query, n_embd, query->ne[1], 1) :
++            ggml_repeat(ctx0, query, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_embd, query->ne[1], n_tokens));
+ 
+     ggml_tensor * scores = ggml_mul_mat(ctx0, states, queries);
+     scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
