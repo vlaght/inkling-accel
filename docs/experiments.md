@@ -90,7 +90,7 @@ therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfuse
 | 4.6 | Patches on vs off for `control_tail` and `gate_build` under DSpark | 100.5 / 100.3 / 101.9 / 101.1 tok/s with both on / `gate_build` off / `control_tail` off / both off: inside noise | info: neutral with speculation, +4.6 % without |
 | 4.7 | Verify the drafter on later turns of a session | 4 turns: accept rate 50 to 66 % on each; decode 85 to 110 tok/s with the patches (80 to 93 without) | info |
 | 4.8 | Output equality | not byte-identical to no speculation: differs after 140 to 250 characters at synonymous near-tie tokens (the verification batch uses other kernels) | info |
-| 4.7 | Results table, one server configuration for every row (`scripts/results-table.py`: `-ub 32`, 4-bit KV, 8 prompts, 6k prompt) | Vulkan 50.5 / 361, CUDA unpatched 65.3 / 518, patched 82.5 / 568, patched + DSpark 101.7 / 545 (decode / prompt tok/s) | info |
+| 4.9 | Results table, one server configuration for every row (`scripts/results-table.py`: `-ub 32`, 4-bit KV, 8 prompts, 6k prompt) | Vulkan 50.5 / 361, CUDA unpatched 65.3 / 518, patched 82.5 / 568, patched + DSpark 101.7 / 545 (decode / prompt tok/s) | info |
 
 ## 5. Context length
 
