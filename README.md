@@ -9,16 +9,19 @@ It works because decoding is bound by kernel launch count (about 7,300 small ker
 
 ## Result
 
-RTX 4070 Ti SUPER 16 GB (Ada), CUDA 13.4, model `Inkling-2-Mini-UD-IQ3_XXS`, one stream, greedy.
+RTX 4070 Ti SUPER 16 GB (Ada), CUDA 13.4, model `Inkling-2-Mini-UD-IQ3_XXS`, one stream, greedy. Every row was measured the same way: `llama-server` with
+`-c 32768 -ub 32 -b 32 -ctk q4_0 -ctv q4_0` (the last row adds the DSpark drafter, 2 drafted tokens), the same 8 prompts of 256 tokens, and the same fresh 6k-token prompt.
+Reproduce with `scripts/results-table.py`.
 
-| | decode tok/s | prompt tok/s |
+| | decode tok/s (8-prompt mean) | prompt tok/s (6k prompt) |
 |---|---|---|
-| llama.cpp Vulkan | 52.8 | 1439 |
-| llama.cpp CUDA | 67.4 | 1901 |
-| CUDA + patches | **88.0** | **2181** |
-| CUDA + patches + DSpark (server, 8-prompt mean; 91.9 with the patches off) | **102.0** (code about 103, JSON about 97, prose about 90) | 544 (6k-token prompt, `-ub 32`) |
+| llama.cpp Vulkan | 50.5 | 361 |
+| llama.cpp CUDA (patches switched off) | 65.3 | 518 |
+| CUDA + patches | **82.5** | **568** |
+| CUDA + patches + DSpark | **101.7** | 545 |
 
-The server row reads prompts more slowly than `llama-bench` because the server runs with a small micro-batch (`-ub 32`), which is what lets a 65k to 131k context fit: 221 tok/s at `-ub 8`, 482 at 32, 688 at 128 (`docs/experiments.md`, 5.7).
+Peak decode with `llama-bench` (`-ub 512`, f16 KV, no server) is 88.0 tok/s patched against 67.4 unpatched; with a larger micro-batch the server reads prompts faster too
+(688 tok/s at `-ub 128`, `docs/experiments.md` 5.7). The small micro-batch is what lets a 65k to 131k context fit.
 
 Quality: KL divergence against the unfused run is 0.0049, the same as the engine's own noise (0.0044 to 0.0047 when only the micro-batch changes).
 

@@ -35,6 +35,7 @@ All scripts read the environment (defaults in `scripts/lib.py`):
 | `spec-bench.py '[["name","server args",{"ENV":"v"}],...]'` | decode speed and draft accept rate over 8 prompts |
 | `ctx-bench.py '[["name","server args"],...]'` | does a context / micro-batch setting start, and its decode and 6k-prompt speed |
 | `multiturn.py '[["name","server args",{}],...]'` | a 4-turn session: speed and accept rate per turn |
+| `results-table.py [vulkan-tree]` | the README results table: every row on the same server arguments and prompts |
 | `serve.sh` | the server launcher (README step 6) |
 
 `lib.SPEC` in `scripts/lib.py` holds the DSpark flags used in the sweeps (2 drafted tokens, 4-bit KV cache for target and drafter).

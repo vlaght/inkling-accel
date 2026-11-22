@@ -22,15 +22,15 @@ os.makedirs(WORK, exist_ok=True)
 SPEC = (f"-ctk q4_0 -ctv q4_0 -ctkd q4_0 -ctvd q4_0 --model-draft {DRAFT} --spec-type draft-dspark --spec-draft-ngl 99 --spec-draft-n-max 2")
 
 
-def bin_(name, root=None):
-    return f"{root or ROOT}/{BUILD}/bin/{name}"
+def bin_(name, root=None, build=None):
+    return f"{root or ROOT}/{build or BUILD}/bin/{name}"
 
 
-def argv(cmd, env=None, root=None):
-    """The argv that runs a shell command with the libraries of the build and the given environment, in the container if one is set."""
-    exports = f"export LD_LIBRARY_PATH={root or ROOT}/{BUILD}/bin:{CUDA}/lib64; " + "".join(f"export {k}={v}; " for k, v in (env or {}).items())
+def argv(cmd, env=None, root=None, build=None, host=False):
+    """The argv that runs a shell command with the libraries of the build and the given environment, in the container if one is set (host=True: never)."""
+    exports = f"export LD_LIBRARY_PATH={root or ROOT}/{build or BUILD}/bin:{CUDA}/lib64; " + "".join(f"export {k}={v}; " for k, v in (env or {}).items())
     inner = exports + cmd
-    return ["distrobox", "enter", DBX, "--", "sh", "-c", inner] if DBX else ["sh", "-c", inner]
+    return ["distrobox", "enter", DBX, "--", "sh", "-c", inner] if DBX and not host else ["sh", "-c", inner]
 
 
 def sh(cmd, env=None, root=None, timeout=3600):
@@ -45,13 +45,13 @@ def _pids():
 class Server:
     """A throw-away llama-server on localhost:PORT with the given extra arguments and environment."""
 
-    def __init__(self, args, env=None, root=None):
-        self.args, self.env, self.root = args, env or {}, root
+    def __init__(self, args, env=None, root=None, build=None, host=False):
+        self.args, self.env, self.root, self.build, self.host = args, env or {}, root, build, host
         self.log = os.path.join(WORK, "server.log")
 
     def __enter__(self):
-        cmd = f"{bin_('llama-server', self.root)} -m {MODEL} -ngl 99 --jinja --host 127.0.0.1 --port {PORT} {self.args}"
-        self.proc = subprocess.Popen(argv(cmd, self.env, self.root), stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
+        cmd = f"{bin_('llama-server', self.root, self.build)} -m {MODEL} -ngl 99 --jinja --host 127.0.0.1 --port {PORT} {self.args}"
+        self.proc = subprocess.Popen(argv(cmd, self.env, self.root, self.build, self.host), stdout=open(self.log, "w"), stderr=subprocess.STDOUT)
         for _ in range(100):
             time.sleep(3)
             if "listening" in open(self.log).read():
@@ -70,6 +70,17 @@ class Server:
                 break
             time.sleep(1)
         time.sleep(3)
+
+
+PROMPTS = [("code", "Write a Python implementation of an LRU cache class with get and put methods, with docstrings and type hints."),
+           ("prose", "Tell me in detail about the history of the Roman Empire, starting with the founding of Rome."),
+           ("json", "Generate a JSON array of 15 objects with fields id, name, email, city, age. Output only JSON."),
+           ("sql", "Write a PostgreSQL schema for a blog with users, posts, comments and tags, with indexes and foreign keys."),
+           ("refactor", "Refactor this into clean TypeScript with types: function f(a,b){var r=[];for(var i=0;i<a.length;i++){if(a[i]>b){r.push(a[i]*2)}}return r}"),
+           ("docs", "Write a README section explaining how to install, configure and run a small command line tool called todo-cli."),
+           ("math", "Explain step by step how to solve the quadratic equation 3x^2 - 7x + 2 = 0 and verify the roots."),
+           ("rust", "Write a Rust function that parses a CSV line into a Vec<String>, handling quoted fields, with unit tests.")]
+LONG = "This is a test paragraph about the history of computing. " * 400   # about 6k tokens
 
 
 def chat(messages, max_tokens=256, **extra):
