@@ -45,8 +45,9 @@ Gain is decode tok/s measured with only the named fusion added to the previous s
 | 2.12 | `conv_dyn_add_scale` | full-attention dynamic `convolve()`: `SSM_CONV` + 4 dynamic lag taps + `ADD` + `SCALE` (15 kernels per call) | 92.5 to 94.5 (+2.1 %); prompt 2823 to 2836 (+0.5 %) | yes | kept |
 | 2.13 | `q8_1_cache` | 4-slot device cache for `quantize_row_q8_1_cuda` (avoids re-quantizing shared F32 activations; cuts `quantize_q8_1` from 390 to 265 launches/tok) | 94.5 to 95.5 (+1.2 %) | yes | kept |
 | 2.14 | `mmvq_scale_only` | scale-only `mul_mat_vec_q` template mode (no `tmp_gate` / `tmp_shared_gate` overhead) + allow `MUL_MAT_ID` expert-scale fusion on all quantized types and fix `ncols` check | 95.5 to 97.4 (+1.9 %) | yes | kept |
+| 2.15 | `topk_norm_eps` | extend `topk_moe_cuda` fusion to match `SCALE(1.0, eps)` (Inkling 2 router norm + scale, 4 kernels per layer = 192 launches/tok) | 97.4 to 99.1 (+1.8 %) | no (sum order) | kept |
 
-Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14).
+Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15).
 Launches per token: 7,258 without the patches, 3,051 with them (-58 %); kernel time 14.8 to 10.2 ms.
 
 Dropped or fixed along the way:
@@ -79,6 +80,7 @@ Mean KL divergence against the unfused run, 12 chunks of 512 tokens, prompt path
 | `control_tail` alone, micro-batch 1 and 3 | 0.0005 | 99.3 to 99.6 % |
 | `conv_dyn_add_scale`, `q8_1_cache`, `mmvq_scale_only` alone | 0 | 100 % |
 | `rel_bias_mask` alone (prompt / decode) | 0 / 0.0021 | 100 % / 98.4 % |
+| `topk_norm_eps` alone (prompt / decode) | 0.0036 / 0.0022 | 97.2 % / 97.6 % |
 | all fusions (prompt / decode) | 0.0033 / 0.0023 | 97.7 % / 98.4 % |
 
 The model amplifies float differences of about 1e-7 to a KLD of a few 1e-3, which the unfused engine also shows when only the batch size changes. The fusions

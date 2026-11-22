@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 3e1f167..9ee3e67 100644
+index 3e1f167..b6dc8bc 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -95,7 +95,6 @@
@@ -43,7 +43,53 @@ index 3e1f167..9ee3e67 100644
              scale->type != GGML_TYPE_F32 || !ggml_is_contiguous(scale) || ggml_nelements(scale) != mm_node->src[0]->ne[2] ||
              !ggml_are_same_shape(scale_node, mm_node)) {
          return nullptr;
-@@ -4466,6 +4478,906 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
+@@ -3784,6 +3796,7 @@ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int nod
+     args.delayed_softmax = false;
+     args.prob_bias       = false;
+     args.norm            = false;
++    args.norm_eps_scale  = false;
+     args.n_groups        = 0;
+     args.n_group_used    = 0;
+ 
+@@ -3904,17 +3917,26 @@ static bool ggml_cuda_topk_moe_fusion(const struct ggml_cgraph * cgraph, int nod
+     }
+ 
+     if (nodes[node_idx]->op == GGML_OP_RESHAPE) {
+-        //check RESHAPE->SUM_ROWS->CLAMP->DIV->RESHAPE
+-        static const std::vector<ggml_op> norm_ops = { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, GGML_OP_CLAMP };
+-
+-        args.norm = true;
+-        for (const ggml_op op : norm_ops) {
+-            if (nodes[node_idx]->op == op && nodes[node_idx]->src[0] == nodes[node_idx - 1]) {
+-                node_idx++;
+-            } else {
+-                args.norm = false;
+-                return true;
+-            }
++        //check RESHAPE->SUM_ROWS->(CLAMP|SCALE_EPS)->DIV->RESHAPE
++        static const bool no_norm_eps = [] {
++            if (getenv("OOT2_NOFUSE") != nullptr) return true;
++            const char * e = getenv("OOT2_NOFUSE_MASK");
++            return e && (atoi(e) & 32768);
++        }();
++        if (node_idx + 2 < n_nodes &&
++            nodes[node_idx]->op == GGML_OP_RESHAPE && nodes[node_idx]->src[0] == nodes[node_idx - 1] &&
++            nodes[node_idx + 1]->op == GGML_OP_SUM_ROWS && nodes[node_idx + 1]->src[0] == nodes[node_idx] &&
++            nodes[node_idx + 2]->src[0] == nodes[node_idx + 1] &&
++            (nodes[node_idx + 2]->op == GGML_OP_CLAMP ||
++             (!no_norm_eps && nodes[node_idx + 2]->op == GGML_OP_SCALE &&
++              ggml_get_op_params_f32(nodes[node_idx + 2], 0) == 1.0f &&
++              ggml_get_op_params_f32(nodes[node_idx + 2], 1) >= 0.0f))) {
++            args.norm = true;
++            args.norm_eps_scale = (nodes[node_idx + 2]->op == GGML_OP_SCALE);
++            node_idx += 3;
++        } else {
++            args.norm = false;
++            return true;
+         }
+ 
+         // DIV <- CLAMP, RESHAPE
+@@ -4466,6 +4488,906 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
  }
  
  // try and fuse nodes and return the number of nodes to skip
@@ -950,7 +996,16 @@ index 3e1f167..9ee3e67 100644
  static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
  
      if (ggml_cuda_fusion_disabled()) {
-@@ -5307,6 +6219,58 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4576,7 +5498,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+ 
+                 if (args.norm) {
+                     ops.insert(ops.end(),
+-                               { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
++                               { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, args.norm_eps_scale ? GGML_OP_SCALE : GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
+                     clamp = cgraph->nodes[i + ops.size() - 3];
+                 }
+                 if (args.scale) {
+@@ -5307,6 +6229,58 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
          return 2;
      }
  
@@ -1009,7 +1064,7 @@ index 3e1f167..9ee3e67 100644
      return 0;
  }
  
-@@ -5347,6 +6311,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5347,6 +6321,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
          }
      };
  
@@ -1018,7 +1073,7 @@ index 3e1f167..9ee3e67 100644
      while (!graph_evaluated_or_captured) {
          // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
          // With the use of CUDA graphs, the execution will be performed by the graph launch.
-@@ -5475,6 +6441,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5475,6 +6451,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                              nodes_to_skip + 1, ggml_op_name(node->op), node->name,
                              ggml_op_name(cgraph->nodes[last_fused]->op), cgraph->nodes[last_fused]->name);
  #endif
@@ -1030,7 +1085,7 @@ index 3e1f167..9ee3e67 100644
                      i += nodes_to_skip;
                      continue;
                  }
-@@ -5500,6 +6471,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5500,6 +6481,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                      GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
                  }
                  GGML_ASSERT(ok);
@@ -1038,6 +1093,15 @@ index 3e1f167..9ee3e67 100644
  
                  if (!is_concurrent_event_active) {
                      try_launch_concurrent_event(node);
+@@ -5778,7 +6760,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
+ 
+                         if (args.norm) {
+                             ops.insert(ops.end(),
+-                                       { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
++                                       { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, args.norm_eps_scale ? GGML_OP_SCALE : GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
+                         }
+                         if (args.scale) {
+                             ops.insert(ops.end(), { GGML_OP_SCALE });
 diff --git a/ggml/src/ggml-cuda/mmvq.cu b/ggml/src/ggml-cuda/mmvq.cu
 index 6f10428..4ddf058 100644
 --- a/ggml/src/ggml-cuda/mmvq.cu
@@ -1371,3 +1435,65 @@ index 5605bf7..385b097 100644
 +
 +void ggml_cuda_q8_1_cache_clear(const void * ctx_key, int device);
 +void ggml_cuda_q8_1_cache_invalidate(const void * ctx_key, const void * ptr, size_t nbytes);
+diff --git a/ggml/src/ggml-cuda/topk-moe.cu b/ggml/src/ggml-cuda/topk-moe.cu
+index d6481ba..30d20f5 100644
+--- a/ggml/src/ggml-cuda/topk-moe.cu
++++ b/ggml/src/ggml-cuda/topk-moe.cu
+@@ -10,6 +10,7 @@ struct topk_moe_config {
+     bool use_sigmoid;
+     bool use_sqrt_softplus;
+     bool with_norm;
++    bool with_norm_eps;
+     bool delayed_softmax;
+     int  n_groups;
+     int  n_group_used;
+@@ -334,11 +335,16 @@ __global__ void topk_moe_cuda(const float *         logits,
+ 
+     if (config.with_norm) {
+         wt_sum              = warp_reduce_sum<warp_size>(wt_sum);
+-        wt_sum              = max(wt_sum, clamp_val);
+-        const float inv_sum = 1.0f / wt_sum;
+-
+-        for (int i = 0; i < experts_per_thread; i++) {
+-            output_weights[i] *= inv_sum;
++        wt_sum              = config.with_norm_eps ? (wt_sum + clamp_val) : max(wt_sum, clamp_val);
++        if (config.with_norm_eps) {
++            for (int i = 0; i < experts_per_thread; i++) {
++                output_weights[i] /= wt_sum;
++            }
++        } else {
++            const float inv_sum = 1.0f / wt_sum;
++            for (int i = 0; i < experts_per_thread; i++) {
++                output_weights[i] *= inv_sum;
++            }
+         }
+     }
+ 
+@@ -464,13 +470,14 @@ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context &     ctx,
+ 
+     float clamp_val = -INFINITY;
+     if (clamp) {
+-        clamp_val = ggml_get_op_params_f32(clamp, 0);
++        clamp_val = args.norm_eps_scale ? ggml_get_op_params_f32(clamp, 1) : ggml_get_op_params_f32(clamp, 0);
+     }
+ 
+     topk_moe_config config;
+     config.use_sigmoid       = args.sigmoid;
+     config.use_sqrt_softplus = args.sqrt_softplus;
+     config.with_norm         = with_norm;
++    config.with_norm_eps     = args.norm_eps_scale;
+     config.delayed_softmax   = args.delayed_softmax;
+     config.n_groups          = args.n_groups;
+     config.n_group_used      = args.n_group_used;
+diff --git a/ggml/src/ggml-cuda/topk-moe.cuh b/ggml/src/ggml-cuda/topk-moe.cuh
+index 3637500..48ac3e8 100644
+--- a/ggml/src/ggml-cuda/topk-moe.cuh
++++ b/ggml/src/ggml-cuda/topk-moe.cuh
+@@ -13,6 +13,7 @@ struct ggml_cuda_topk_moe_args {
+     bool delayed_softmax{};
+     bool prob_bias{};
+     bool norm{};
++    bool norm_eps_scale{};
+     bool scale{};
+     int  n_groups{};     // > 0: pick experts only from the top n_group_used expert groups
+     int  n_group_used{};
