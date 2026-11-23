@@ -112,7 +112,7 @@ therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfuse
 | 4.4 | `LLAMA_SPEC_ADAPT=1` (adaptive pausing) with 4 drafts | 88.0 / 67.6 / 82.3 against 92.0 / 58.9 / 85.2 without: better on prose, worse on code and JSON, and below a fixed 2 | dropped |
 | 4.5 | 8-prompt mean with 2 drafts, patches on vs off | 100.5 vs 90.6 tok/s (+11 %); with the final English prompt set of `scripts/spec-bench.py` 102.0 vs 91.9 (+11 %) | info |
 | 4.6 | Patches on vs off for `control_tail` and `gate_build` under DSpark | 100.5 / 100.3 / 101.9 / 101.1 tok/s with both on / `gate_build` off / `control_tail` off / both off: inside noise | info: neutral with speculation, +4.6 % without |
-| 4.7 | Verify the drafter on later turns of a session | 4 turns: accept rate 50 to 66 % on each; decode 85 to 110 tok/s with the patches (80 to 93 without) | info |
+| 4.7 | Verify the drafter on later turns of a session | 4 turns: accept rate 38 to 64 % on each; decode 91 to 117 tok/s with the patches (79 to 93 without) | info |
 | 4.8 | Output equality | not byte-identical to no speculation: differs after 140 to 250 characters at synonymous near-tie tokens (the verification batch uses other kernels) | info |
 | 4.9 | Results table, one server configuration for every row (`scripts/results-table.py`: `-ub 32`, 4-bit KV, 8 prompts, 6k prompt) | CUDA unpatched 65.1 / 519, patched 103.5 / 798 (+59.0 % / +53.8 %), patched + DSpark 112.0 / 746 (+72.0 % / +43.9 %) (decode / prompt tok/s) | info |
 
@@ -141,5 +141,5 @@ Not run; judged from their documentation.
 ## 7. Open ideas
 
 Each is estimated at 1 to 3 %: merging the
-gain and forget matrices of the controllers into one mat-vec, fusing the small F32 mat-vecs (about 330 launches per token at about 2.8 µs), and a persistent
+gain and forget matrices of the controllers into one mat-vec, fusing the small F32/BF16 mat-vecs (208 launches per token: 144 F32 at 3.3 µs, 64 BF16 at 1.7 µs), and a persistent
 kernel for a whole layer visit.
