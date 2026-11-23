@@ -49,8 +49,9 @@ Gain is decode tok/s measured with only the named fusion added to the previous s
 | 2.16 | `clip_mul` | fuse preceding `MUL(x, scale)` into `k_inkling_clip` (96 calls/tok for `Qcur` and `Rcur`) | 99.1 to 100.0 (+0.9 %) | no (sum order) | kept |
 | 2.17 | `mix_single` | collapse 2-kernel `mix_attn` (`k_inkling_mix_dots` + `k_inkling_mix_out`) into 1 block-per-token kernel (`256` threads, `float4`, 2 barriers, no `xn` write, specialized `NQ`) | 100.0 to 101.7 (+1.6 %); prompt 2841 to 3090 (+8.7 %) | no (sum order) | kept |
 | 2.18 | `mix_regq` | optimize `k_inkling_mix_single` by caching `q` in registers across `B` (unrolled 3x `float4`, `__ldg`) and warp-parallelizing the `B`-lane reduction + softmax in warp 0 | 101.7 to 102.8 (+1.1 %) | no (sum order) | kept |
+| 2.19 | `concat_conv_add_scale` | defer `build_conv_state_store` after `res` in `convolve()` (`inkling2.cpp`) and fuse `CONCAT + SSM_CONV + RESHAPE + ADD + SCALE + VIEW + CPY` into 1 kernel (eliminates 176 `concat_cpy` launches/tok and intermediate `x` write/read); also drop unused `xnn`/`scores` disjointness checks for single-kernel `mix_attn` | 102.8 to 105.4 (+2.5 %); prompt 3090 to 3712 (+20.1 %) | yes | kept |
 
-Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15), 100.0 (2.16), 101.7 (2.17), 102.8 (2.18).
+Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15), 100.0 (2.16), 101.7 (2.17), 102.8 (2.18), 105.4 (2.19).
 Launches per token: 7,258 without the patches, 2,646 with them (-64 %); kernel time 14.8 to 9.8 ms.
 
 Dropped or fixed along the way:
@@ -81,13 +82,13 @@ Mean KL divergence against the unfused run, 12 chunks of 512 tokens, prompt path
 | `mix_attn` alone | 0.0046 | 97.2 % |
 | `clip` alone | 0.0047 | 97.2 % |
 | `control_tail` alone, micro-batch 1 and 3 | 0.0005 | 99.3 to 99.6 % |
-| `conv_dyn_add_scale`, `q8_1_cache`, `mmvq_scale_only` alone | 0 | 100 % |
+| `conv_dyn_add_scale`, `q8_1_cache`, `mmvq_scale_only`, `concat_conv_add_scale` alone | 0 | 100 % |
 | `rel_bias_mask` alone (prompt / decode) | 0 / 0.0021 | 100 % / 98.4 % |
 | `topk_norm_eps` alone (prompt / decode) | 0.0036 / 0.0022 | 97.2 % / 97.6 % |
 | `clip_mul` alone (prompt / decode) | 0.0036 / 0.0010 | 97.7 % / 99.5 % |
 | `mix_single` alone (prompt / decode) | 0.0037 / 0.0020 | 97.3 % / 99.2 % |
 | `mix_regq` alone (prompt / decode) | 0.0035 / 0.0017 | 97.7 % / 98.9 % |
-| all fusions (prompt / decode) | 0.0035 / 0.0028 | 97.4 % / 97.6 % |
+| all fusions (prompt / decode) | 0.0038 / 0.0025 | 97.5 % / 97.9 % |
 
 The model amplifies float differences of about 1e-7 to a KLD of a few 1e-3, which the unfused engine also shows when only the batch size changes. The fusions
 therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfused: 4.0842 vs 4.0802 (prompt path, 40 chunks, error +-0.09) and 3.9608 vs 3.9554

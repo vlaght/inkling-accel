@@ -1,5 +1,5 @@
 diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
-index e035d1a..e3699c2 100644
+index e035d1a..f7f3758 100644
 --- a/src/models/inkling2.cpp
 +++ b/src/models/inkling2.cpp
 @@ -182,7 +182,9 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
@@ -13,18 +13,42 @@ index e035d1a..e3699c2 100644
  
      ggml_tensor * scores = ggml_mul_mat(ctx0, states, queries);
      scores = ggml_soft_max_ext(ctx0, scores, nullptr, 1.0f/sqrtf(n_embd), 0.0f);
-@@ -212,6 +214,10 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
+@@ -210,7 +212,19 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
+     ggml_tensor * x = ggml_transpose(ctx0, ggml_reshape_3d(ctx0, cur, n_channels, n_seq_tokens, n_seqs));
+     x = ggml_concat(ctx0, past, x, 0);
  
-     build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
- 
+-    build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
++    static const bool no_concat_conv = [] {
++        if (getenv("OOT2_NOFUSE") != nullptr) return true;
++        const char * e = getenv("OOT2_NOFUSE_MASK");
++        return e && (atoi(e) & 524288);
++    }();
++    const bool defer_store = !no_concat_conv && !dynamic;
++    if (!defer_store) {
++        build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
++    }
++
 +    if (dynamic) {
 +        ggml_build_forward_expand(gf, dynamic);
 +    }
-+
+ 
      ggml_tensor * out = ggml_ssm_conv(ctx0, x, weight);
      out = ggml_reshape_2d(ctx0, out, n_channels, n_tokens);
+@@ -233,7 +247,12 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
+         }
+     }
  
-@@ -353,6 +359,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+-    return ggml_scale(ctx0, ggml_add(ctx0, cur, out), 1.0f/sqrtf((dynamic ? 2 : 1)*n_conv + 1));
++    ggml_tensor * res = ggml_scale(ctx0, ggml_add(ctx0, cur, out), 1.0f/sqrtf((dynamic ? 2 : 1)*n_conv + 1));
++    if (defer_store) {
++        ggml_build_forward_expand(gf, res);
++        build_conv_state_store(inp, state, x, n_conv - 1, offset*(n_conv - 1)*ggml_element_size(state));
++    }
++    return res;
+ }
+ 
+ // mix a cross-pass message into a looped layer input: (1 - forget)*cur + gain*message, both gated on cur and message
+@@ -353,6 +372,10 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
  
          ggml_tensor * sinks = build_lora_mm(layer.attn_sink_proj, inputs[0]);
  
