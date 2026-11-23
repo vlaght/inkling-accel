@@ -1,5 +1,5 @@
 diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
-index e035d1a..c5de2f1 100644
+index e035d1a..6277208 100644
 --- a/src/models/inkling2.cpp
 +++ b/src/models/inkling2.cpp
 @@ -182,7 +182,9 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
@@ -59,7 +59,30 @@ index e035d1a..c5de2f1 100644
          // project r on the bias table first, then gather by distance: only the gathered bias is n_kv x n_tokens x n_head
          ggml_tensor * table = ggml_mul_mat(ctx0, ggml_pad(ctx0, layer.attn_rel_bias, 0, 1, 0, 0), Rcur);
  
-@@ -377,10 +400,18 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+@@ -365,7 +388,21 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+         kq_b = ggml_cont(ctx0, ggml_permute(ctx0, kq_b, 2, 0, 1, 3));
+         cb(kq_b, "kq_b", il);
+ 
+-        sinks = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_head), 0.0f);
++        static const bool no_shared_sinks = [] {
++            if (getenv("OOT2_NOFUSE") != nullptr) return true;
++            const char * e = getenv("OOT2_NOFUSE_MASK");
++            return e && (atoi(e) & 16777216);
++        }();
++        if (!no_shared_sinks) {
++            ggml_tensor * shared_sinks = ggml_get_tensor(ctx0, "inkling2_zero_sinks");
++            if (!shared_sinks || shared_sinks->ne[0] != n_head) {
++                shared_sinks = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_head), 0.0f);
++                ggml_set_name(shared_sinks, "inkling2_zero_sinks");
++            }
++            sinks = shared_sinks;
++        } else {
++            sinks = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_head), 0.0f);
++        }
+ 
+         cur = build_attn(inp,
+                 nullptr, nullptr, nullptr,
+@@ -377,10 +414,18 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
      }
  
      // the first layer of each block starts a new residual stream, the earlier one joins the mixed blocks
@@ -78,7 +101,7 @@ index e035d1a..c5de2f1 100644
      }
  
      ggml_tensor * ffn_inp = cur;
-@@ -415,6 +446,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+@@ -415,6 +460,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
      cb(cur, "ffn_out", il);
  
      cur = ggml_add(ctx0, ffn_inp, cur);
