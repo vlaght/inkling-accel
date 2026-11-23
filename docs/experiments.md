@@ -57,7 +57,7 @@ Gain is decode tok/s measured with only the named fusion added to the previous s
 | 2.24 | `shared_sinks` | hoist the constant zero `sinks` tensor (`ggml_fill(0.0f)`) in `inkling2.cpp` so all 48 attention layers share one tensor instead of launching 48 identical `fill_kernel<float>` kernels/tok (-47 launches/tok) | 109.8 to 110.3 (+0.5 %) | yes | kept |
 
 Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15), 100.0 (2.16), 101.7 (2.17), 102.8 (2.18), 105.4 (2.19), 106.7 (2.20), 108.1 (2.21), 109.3 (2.22), 110.0 (2.23), 110.3 (2.24).
-Launches per token: 7,258 without the patches, 2,646 with them (-64 %); kernel time 14.8 to 9.8 ms.
+Launches per token: 7,258 without the patches, 2,028 with them (-72 %); kernel time 14.8 to 9.0 ms.
 
 Dropped or fixed along the way:
 
@@ -69,6 +69,9 @@ Dropped or fixed along the way:
 | 2.14 | `control_tail` for any number of tokens | prompt speed fell 11 % (each token re-reads both matrices) | limited to 8 tokens |
 | 2.15 | First `cat_rms` (norm + concat of the controller gate) | **never fired**: the message copy is read a second time by the controller tail, and a fused chain may not swallow a node that is read outside it. The kernel list of the profile had no such kernel, and the gain credited to it had come from other fusions | replaced by `gate_build`, which writes that copy itself |
 | 2.16 | Fuse `MUL_MAT_ID` expert scales via existing `has_fusion=true` path in `mul_mat_vec_q` | decode fell 95.55 to 94.23 (-1.4 %): `has_fusion=true` allocates `tmp_gate` registers and `tmp_shared_gate` shared memory even when `gate == nullptr`, adding ~4.6 us per mat-vec | replaced by 2.14 (`fusion_mode=1`, scale-only) |
+| 2.17 | Custom `mul_mat_vec_f32_vec4` for small F32 matvecs (`mmvf.cu`, 144 calls/tok) | 512/1024 threads regressed 108.1 to 107.0; 256 threads +0.15 tok/s (within noise); stock `mul_mat_vec_f` is already at GDDR6X bandwidth + launch floor | dropped |
+| 2.18 | `concat_conv_kv`: expand SWA `Kcur` clip and `Vcur` rms_norm immediately after `convolve()` and fold into `k_inkling_concat_conv_head` | decode +0.4 % (109.3 to 109.7), but prompt regressed -13 % (3825 to 3325 tok/s) due to graph reordering | dropped |
+| 2.19 | `clip_mul_tau`: fold trailing `MUL(..., tau)` on the 8 non-SWA layers into `k_inkling_clip_mul` (16 launches/tok) | +0.11 tok/s (110.22 to 110.32), within measurement noise | dropped |
 
 Debugging note: when checking a fused kernel against a host reference, copy the inputs to the host before launching it. The allocator may place a result on dead
 inputs, and reading them afterwards shows false errors (this produced a bogus relative error of 0.4 once). The fused `mix_attn` matches a double-precision
@@ -93,7 +96,7 @@ Mean KL divergence against the unfused run, 12 chunks of 512 tokens, prompt path
 | `clip_mul` alone (prompt / decode) | 0.0036 / 0.0010 | 97.7 % / 99.5 % |
 | `mix_single` alone (prompt / decode) | 0.0037 / 0.0020 | 97.3 % / 99.2 % |
 | `mix_regq` alone (prompt / decode) | 0.0035 / 0.0017 | 97.7 % / 98.9 % |
-| all fusions (prompt / decode) | 0.0038 / 0.0025 | 97.5 % / 97.9 % |
+| all fusions (prompt / decode) | 0.0038 / 0.0027 | 97.3 % / 97.9 % |
 
 The model amplifies float differences of about 1e-7 to a KLD of a few 1e-3, which the unfused engine also shows when only the batch size changes. The fusions
 therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfused: 4.0842 vs 4.0802 (prompt path, 40 chunks, error +-0.09) and 3.9608 vs 3.9554
@@ -111,7 +114,7 @@ therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfuse
 | 4.6 | Patches on vs off for `control_tail` and `gate_build` under DSpark | 100.5 / 100.3 / 101.9 / 101.1 tok/s with both on / `gate_build` off / `control_tail` off / both off: inside noise | info: neutral with speculation, +4.6 % without |
 | 4.7 | Verify the drafter on later turns of a session | 4 turns: accept rate 50 to 66 % on each; decode 85 to 110 tok/s with the patches (80 to 93 without) | info |
 | 4.8 | Output equality | not byte-identical to no speculation: differs after 140 to 250 characters at synonymous near-tie tokens (the verification batch uses other kernels) | info |
-| 4.9 | Results table, one server configuration for every row (`scripts/results-table.py`: `-ub 32`, 4-bit KV, 8 prompts, 6k prompt) | CUDA unpatched 65.3 / 518, patched 82.5 / 568, patched + DSpark 101.7 / 545 (decode / prompt tok/s) | info |
+| 4.9 | Results table, one server configuration for every row (`scripts/results-table.py`: `-ub 32`, 4-bit KV, 8 prompts, 6k prompt) | CUDA unpatched 65.1 / 519, patched 103.5 / 798 (+59.0 % / +53.8 %), patched + DSpark 112.0 / 746 (+72.0 % / +43.9 %) (decode / prompt tok/s) | info |
 
 ## 5. Context length
 
