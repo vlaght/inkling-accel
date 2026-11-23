@@ -1,5 +1,5 @@
 diff --git a/src/models/inkling2.cpp b/src/models/inkling2.cpp
-index e035d1a..f7f3758 100644
+index e035d1a..c5de2f1 100644
 --- a/src/models/inkling2.cpp
 +++ b/src/models/inkling2.cpp
 @@ -182,7 +182,9 @@ ggml_tensor * llama_model_inkling2::graph::mix(const std::vector<ggml_tensor *>
@@ -59,3 +59,32 @@ index e035d1a..f7f3758 100644
          // project r on the bias table first, then gather by distance: only the gathered bias is n_kv x n_tokens x n_head
          ggml_tensor * table = ggml_mul_mat(ctx0, ggml_pad(ctx0, layer.attn_rel_bias, 0, 1, 0, 0), Rcur);
  
+@@ -377,10 +400,18 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+     }
+ 
+     // the first layer of each block starts a new residual stream, the earlier one joins the mixed blocks
++    static const bool no_conv_res = [] {
++        if (getenv("OOT2_NOFUSE") != nullptr) return true;
++        const char * e = getenv("OOT2_NOFUSE_MASK");
++        return e && (atoi(e) & 4194304);
++    }();
+     if (ip % hparams.attn_res_block_size == 0) {
+         blocks.push_back(inpSA);
+     } else {
+         cur = ggml_add(ctx0, inpSA, cur);
++        if (!no_conv_res) {
++            ggml_build_forward_expand(gf, cur);
++        }
+     }
+ 
+     ggml_tensor * ffn_inp = cur;
+@@ -415,6 +446,9 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
+     cb(cur, "ffn_out", il);
+ 
+     cur = ggml_add(ctx0, ffn_inp, cur);
++    if (!no_conv_res) {
++        ggml_build_forward_expand(gf, cur);
++    }
+     cb(cur, "l_out", il);
+ 
+     return cur;

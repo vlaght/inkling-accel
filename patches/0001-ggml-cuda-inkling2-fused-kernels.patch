@@ -1,5 +1,5 @@
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
-index 3e1f167..850f047 100644
+index 3e1f167..d039aac 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
 @@ -95,7 +95,6 @@
@@ -89,7 +89,7 @@ index 3e1f167..850f047 100644
          }
  
          // DIV <- CLAMP, RESHAPE
-@@ -4466,6 +4488,1584 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
+@@ -4466,6 +4488,1622 @@ static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
  }
  
  // try and fuse nodes and return the number of nodes to skip
@@ -1394,6 +1394,7 @@ index 3e1f167..850f047 100644
 +static __global__ void k_inkling_concat_conv_add_scale(
 +        const char * __restrict__ a, const char * __restrict__ b,
 +        const float * __restrict__ w, const float * __restrict__ cur,
++        const float * __restrict__ res_add,
 +        float * __restrict__ dst, float * __restrict__ cell,
 +        const int64_t C, const int64_t nt, const int64_t ns, const int64_t ne0a,
 +        const size_t a_nb0, const size_t a_nb1, const size_t a_nb2,
@@ -1424,42 +1425,72 @@ index 3e1f167..850f047 100644
 +        }
 +    }
 +    const float v = __fadd_rn(cur[k], sumf);
-+    dst[k] = __fadd_rn(__fmul_rn(v, scale), bias);
++    float out = __fadd_rn(__fmul_rn(v, scale), bias);
++    if (res_add) {
++        out = __fadd_rn(res_add[k], out);
++    }
++    dst[k] = out;
 +}
 +
-+static bool ggml_cuda_fuse_inkling_concat_conv_add_scale(ggml_backend_cuda_context * cuda_ctx, const ggml_cgraph * cgraph, int i) {
++static int ggml_cuda_fuse_inkling_concat_conv_add_scale(ggml_backend_cuda_context * cuda_ctx, const ggml_cgraph * cgraph, int i) {
 +    static const bool disabled = getenv("OOT2_NOFUSE") != nullptr || (ggml_cuda_inkling_nofuse_mask() & 524288);
 +    if (disabled || i + 8 > cgraph->n_nodes || cgraph->nodes[i]->op != GGML_OP_CONCAT ||
 +        cgraph->nodes[i + 1]->op != GGML_OP_SSM_CONV || cgraph->nodes[i + 6]->op != GGML_OP_VIEW ||
 +        cgraph->nodes[i + 7]->op != GGML_OP_CPY) {
-+        return false;
-+    }
-+    static const enum ggml_op ops[7] = {
-+        GGML_OP_CONCAT, GGML_OP_SSM_CONV, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_SCALE, GGML_OP_VIEW, GGML_OP_CPY
-+    };
-+    const int idxs[7] = { i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 7 };
-+    const int outs[2] = { i + 4, i + 7 };
-+    if (!ggml_can_fuse_subgraph_ext(cgraph, idxs, 7, ops, outs, 2)) {
-+        return false;
++        return 0;
 +    }
 +    ggml_tensor * const * n = cgraph->nodes + i;
++    static const bool no_res_add = getenv("OOT2_NOFUSE") != nullptr || (ggml_cuda_inkling_nofuse_mask() & 4194304);
++    bool fuse_res_add = false;
++    if (!no_res_add && i + 9 <= cgraph->n_nodes && n[8]->op == GGML_OP_ADD &&
++        (n[8]->src[0] == n[4] || n[8]->src[1] == n[4])) {
++        static const enum ggml_op ops8[8] = {
++            GGML_OP_CONCAT, GGML_OP_SSM_CONV, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_SCALE, GGML_OP_VIEW, GGML_OP_CPY, GGML_OP_ADD
++        };
++        const int idxs8[8] = { i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 7, i + 8 };
++        const int outs8[2] = { i + 7, i + 8 };
++        if (ggml_can_fuse_subgraph_ext(cgraph, idxs8, 8, ops8, outs8, 2)) {
++            fuse_res_add = true;
++        }
++    }
++    if (!fuse_res_add) {
++        static const enum ggml_op ops[7] = {
++            GGML_OP_CONCAT, GGML_OP_SSM_CONV, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_SCALE, GGML_OP_VIEW, GGML_OP_CPY
++        };
++        const int idxs[7] = { i, i + 1, i + 2, i + 3, i + 4, i + 5, i + 7 };
++        const int outs[2] = { i + 4, i + 7 };
++        if (!ggml_can_fuse_subgraph_ext(cgraph, idxs, 7, ops, outs, 2)) {
++            return 0;
++        }
++    }
 +    const ggml_tensor * cat  = n[0];
 +    const ggml_tensor * a    = cat->src[0];
 +    const ggml_tensor * b    = cat->src[1];
 +    const ggml_tensor * w    = n[1]->src[1];
 +    const ggml_tensor * cur  = n[3]->src[0] == n[2] ? n[3]->src[1] : n[3]->src[0];
-+    const ggml_tensor * dst  = n[4];
++    const ggml_tensor * scl  = n[4];
 +    const ggml_tensor * last = n[5];
 +    const ggml_tensor * cell = n[7];
++    const ggml_tensor * res_add = fuse_res_add ? (n[8]->src[0] == scl ? n[8]->src[1] : n[8]->src[0]) : nullptr;
++    const ggml_tensor * dst     = fuse_res_add ? n[8] : scl;
 +
 +    if (ggml_get_op_params_i32(cat, 0) != 0 || n[1]->src[0] != cat || n[2]->src[0] != n[1] ||
-+        (n[3]->src[0] != n[2] && n[3]->src[1] != n[2]) || n[4]->src[0] != n[3] ||
++        (n[3]->src[0] != n[2] && n[3]->src[1] != n[2]) || scl->src[0] != n[3] ||
 +        last->view_src != cat || n[7]->src[0] != last || n[7]->src[1] != n[6]) {
-+        return false;
++        return 0;
 +    }
 +    const int64_t C = n[1]->ne[0], nt = n[1]->ne[1], ns = n[1]->ne[2];
 +    const int64_t ne0 = cat->ne[0], ne0a = a->ne[0], n_cols = last->ne[0];
 +    const int dc = (int) w->ne[0];
++    if (fuse_res_add) {
++        if (res_add->type != GGML_TYPE_F32 || !ggml_is_contiguous(res_add) || !ggml_are_same_shape(res_add, scl) ||
++            dst->type != GGML_TYPE_F32 || !ggml_is_contiguous(dst) || !ggml_are_same_shape(dst, scl) ||
++            !ggml_cuda_inkling_same_or_disjoint(dst, res_add)) {
++            fuse_res_add = false;
++            res_add = nullptr;
++            dst = scl;
++        }
++    }
 +    if (cat->type != GGML_TYPE_F32 || a->type != GGML_TYPE_F32 || b->type != GGML_TYPE_F32 ||
 +        w->type != GGML_TYPE_F32 || cur->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 || cell->type != GGML_TYPE_F32 ||
 +        dc < 1 || dc > 16 || n_cols < 1 || n_cols > dc ||
@@ -1474,26 +1505,33 @@ index 3e1f167..850f047 100644
 +        (const char *) cell->data != (const char *) n[6]->data || ggml_nelements(cell) != n_cols * C * ns ||
 +        !ggml_inkling_disjoint(dst, a) || !(nt == 1 ? ggml_cuda_inkling_same_or_disjoint(dst, b) : ggml_inkling_disjoint(dst, b)) ||
 +        !ggml_cuda_inkling_same_or_disjoint(dst, w) || !ggml_cuda_inkling_same_or_disjoint(dst, cur)) {
-+        return false;
++        return 0;
 +    }
 +    const char * c0 = (const char *) n[6]->data, * c1 = c0 + (ns - 1) * n[6]->nb[1] + n_cols * C * sizeof(float);
 +    const char * a0 = (const char *) a->data,    * a1 = a0 + ggml_nbytes(a);
 +    const char * b0 = (const char *) b->data,    * b1 = b0 + ggml_nbytes(b);
 +    const char * d0 = (const char *) dst->data,  * d1 = d0 + ggml_nbytes(dst);
 +    if (!(c1 <= a0 || a1 <= c0) || !(c1 <= b0 || b1 <= c0) || !(c1 <= d0 || d1 <= c0)) {
-+        return false;
++        return 0;
++    }
++    if (fuse_res_add) {
++        const char * r0 = (const char *) res_add->data, * r1 = r0 + ggml_nbytes(res_add);
++        if (!(c1 <= r0 || r1 <= c0)) {
++            return 0;
++        }
 +    }
 +    float scale, bias;
-+    memcpy(&scale, (const float *) dst->op_params + 0, sizeof(float));
-+    memcpy(&bias,  (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&scale, (const float *) scl->op_params + 0, sizeof(float));
++    memcpy(&bias,  (const float *) scl->op_params + 1, sizeof(float));
 +    const int64_t total = C * nt * ns;
 +    k_inkling_concat_conv_add_scale<<<(unsigned) ((total + 127) / 128), 128, 0, cuda_ctx->stream()>>>(
 +        (const char *) a->data, (const char *) b->data, (const float *) w->data, (const float *) cur->data,
++        res_add ? (const float *) res_add->data : nullptr,
 +        (float *) dst->data, (float *) n[6]->data, C, nt, ns, ne0a,
 +        a->nb[0], a->nb[1], a->nb[2], b->nb[0], b->nb[1], b->nb[2],
 +        w->nb[1], dc, n_cols, n[6]->nb[1], scale, bias);
 +    CUDA_CHECK(cudaGetLastError());
-+    return true;
++    return fuse_res_add ? 8 : 7;
 +}
 +
 +
@@ -1674,7 +1712,7 @@ index 3e1f167..850f047 100644
  static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph, int i) {
  
      if (ggml_cuda_fusion_disabled()) {
-@@ -4576,7 +6176,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -4576,7 +6214,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
  
                  if (args.norm) {
                      ops.insert(ops.end(),
@@ -1683,7 +1721,7 @@ index 3e1f167..850f047 100644
                      clamp = cgraph->nodes[i + ops.size() - 3];
                  }
                  if (args.scale) {
-@@ -5266,7 +6866,9 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -5266,7 +6904,9 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
      }
  
      if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
@@ -1694,7 +1732,7 @@ index 3e1f167..850f047 100644
          return 1;
      }
  
-@@ -5288,7 +6890,9 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -5288,7 +6928,9 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
      if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL }, { GGML_UNARY_OP_SILU }) ||
          ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL }, { GGML_UNARY_OP_SIGMOID }) ||
          ggml_cuda_can_fuse(cgraph, i, { GGML_OP_UNARY, GGML_OP_MUL }, { GGML_UNARY_OP_SOFTPLUS })) {
@@ -1705,7 +1743,7 @@ index 3e1f167..850f047 100644
          return 1;
      }
  
-@@ -5307,6 +6911,66 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
+@@ -5307,6 +6949,66 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph
          return 2;
      }
  
@@ -1729,8 +1767,8 @@ index 3e1f167..850f047 100644
 +        return 3;
 +    }
 +
-+    if (ggml_cuda_fuse_inkling_concat_conv_add_scale(cuda_ctx, cgraph, i)) {
-+        return 7;
++    if (int skip = ggml_cuda_fuse_inkling_concat_conv_add_scale(cuda_ctx, cgraph, i)) {
++        return skip;
 +    }
 +
 +    if (ggml_cuda_fuse_inkling_concat_cpy(cuda_ctx, cgraph, i)) {
@@ -1772,7 +1810,7 @@ index 3e1f167..850f047 100644
      return 0;
  }
  
-@@ -5347,6 +7011,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5347,6 +7049,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
          }
      };
  
@@ -1781,7 +1819,7 @@ index 3e1f167..850f047 100644
      while (!graph_evaluated_or_captured) {
          // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
          // With the use of CUDA graphs, the execution will be performed by the graph launch.
-@@ -5466,6 +7132,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5466,6 +7170,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                      continue;
                  }
  
@@ -1789,7 +1827,7 @@ index 3e1f167..850f047 100644
                  int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
  
                  if (nodes_to_skip != 0) {
-@@ -5475,6 +7142,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5475,6 +7180,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                              nodes_to_skip + 1, ggml_op_name(node->op), node->name,
                              ggml_op_name(cgraph->nodes[last_fused]->op), cgraph->nodes[last_fused]->name);
  #endif
@@ -1801,7 +1839,7 @@ index 3e1f167..850f047 100644
                      i += nodes_to_skip;
                      continue;
                  }
-@@ -5500,6 +7172,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
+@@ -5500,6 +7210,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                      GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
                  }
                  GGML_ASSERT(ok);
@@ -1809,7 +1847,7 @@ index 3e1f167..850f047 100644
  
                  if (!is_concurrent_event_active) {
                      try_launch_concurrent_event(node);
-@@ -5778,7 +7451,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
+@@ -5778,7 +7489,7 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
  
                          if (args.norm) {
                              ops.insert(ops.end(),

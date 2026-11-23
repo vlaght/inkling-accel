@@ -52,8 +52,9 @@ Gain is decode tok/s measured with only the named fusion added to the previous s
 | 2.19 | `concat_conv_add_scale` | defer `build_conv_state_store` after `res` in `convolve()` (`inkling2.cpp`) and fuse `CONCAT + SSM_CONV + RESHAPE + ADD + SCALE + VIEW + CPY` into 1 kernel (eliminates 176 `concat_cpy` launches/tok and intermediate `x` write/read); also drop unused `xnn`/`scores` disjointness checks for single-kernel `mix_attn` | 102.8 to 105.4 (+2.5 %); prompt 3090 to 3712 (+20.1 %) | yes | kept |
 | 2.20 | `rms_norm_mul_q8_1` | fuse single-row `RMS_NORM + MUL` with Q8_1 pre-quantization directly into the `q8_1_cache` (8-thread `float4` warp shuffle + `char4` stores, bump cache to 8 slots, tick-guarded post-fusion invalidation), eliminating ~145 `quantize_q8_1` launches/tok | 105.3 to 106.7 (+1.4 %) | yes | kept |
 | 2.21 | `act_q8_1` | fuse Q8_1 pre-quantization into `k_inkling_situ` (48 MoE activations) and single-row `SIGMOID + MUL` (48 attention output gates), eliminating 96 more `quantize_q8_1` launches/tok (leaving 1/tok total) | 106.9 to 108.1 (+1.1 %) | yes | kept |
+| 2.22 | `concat_conv_res` | expand post-conv residual `ADD` immediately after `attn_post_conv` / `ffn_post_conv` in `inkling2.cpp` and fold it into `k_inkling_concat_conv_add_scale` (eliminates 88 `k_bin_bcast<&op_add>` launches/tok) | 108.1 to 109.3 (+1.1 %); prompt 3718 to 3824 (+2.9 %) | yes | kept |
 
-Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15), 100.0 (2.16), 101.7 (2.17), 102.8 (2.18), 105.4 (2.19), 106.7 (2.20), 108.1 (2.21).
+Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15), 100.0 (2.16), 101.7 (2.17), 102.8 (2.18), 105.4 (2.19), 106.7 (2.20), 108.1 (2.21), 109.3 (2.22).
 Launches per token: 7,258 without the patches, 2,646 with them (-64 %); kernel time 14.8 to 9.8 ms.
 
 Dropped or fixed along the way:
@@ -84,7 +85,7 @@ Mean KL divergence against the unfused run, 12 chunks of 512 tokens, prompt path
 | `mix_attn` alone | 0.0046 | 97.2 % |
 | `clip` alone | 0.0047 | 97.2 % |
 | `control_tail` alone, micro-batch 1 and 3 | 0.0005 | 99.3 to 99.6 % |
-| `conv_dyn_add_scale`, `q8_1_cache`, `mmvq_scale_only`, `concat_conv_add_scale`, `rms_norm_mul_q8_1`, `act_q8_1` alone | 0 | 100 % |
+| `conv_dyn_add_scale`, `q8_1_cache`, `mmvq_scale_only`, `concat_conv_add_scale`, `rms_norm_mul_q8_1`, `act_q8_1`, `concat_conv_res` alone | 0 | 100 % |
 | `rel_bias_mask` alone (prompt / decode) | 0 / 0.0021 | 100 % / 98.4 % |
 | `topk_norm_eps` alone (prompt / decode) | 0.0036 / 0.0022 | 97.2 % / 97.6 % |
 | `clip_mul` alone (prompt / decode) | 0.0036 / 0.0010 | 97.7 % / 99.5 % |
