@@ -50,7 +50,7 @@ Gain is decode tok/s measured with only the named fusion added to the previous s
 | 2.17 | `mix_single` | collapse 2-kernel `mix_attn` (`k_inkling_mix_dots` + `k_inkling_mix_out`) into 1 block-per-token kernel (`256` threads, `float4`, 2 barriers, no `xn` write, specialized `NQ`) | 100.0 to 101.7 (+1.6 %); prompt 2841 to 3090 (+8.7 %) | no (sum order) | kept |
 
 Cumulative decode (`llama-bench`): 68.1 (unfused), 73.7 (2.1 to 2.2), 75.9 (2.3, 2.4), 79.0 (2.5, 2.6), 79.6 (2.7), 84.1 (2.8), 86.4 (2.9), 88.0 (2.10), 92.5 (2.11), 94.5 (2.12), 95.5 (2.13), 97.4 (2.14), 99.1 (2.15), 100.0 (2.16), 101.7 (2.17).
-Launches per token: 7,258 without the patches, 3,051 with them (-58 %); kernel time 14.8 to 10.2 ms.
+Launches per token: 7,258 without the patches, 2,646 with them (-64 %); kernel time 14.8 to 9.8 ms.
 
 Dropped or fixed along the way:
 
@@ -85,7 +85,7 @@ Mean KL divergence against the unfused run, 12 chunks of 512 tokens, prompt path
 | `topk_norm_eps` alone (prompt / decode) | 0.0036 / 0.0022 | 97.2 % / 97.6 % |
 | `clip_mul` alone (prompt / decode) | 0.0036 / 0.0010 | 97.7 % / 99.5 % |
 | `mix_single` alone (prompt / decode) | 0.0037 / 0.0020 | 97.3 % / 99.2 % |
-| all fusions (prompt / decode) | 0.0033 / 0.0023 | 97.7 % / 98.4 % |
+| all fusions (prompt / decode) | 0.0035 / 0.0028 | 97.4 % / 97.6 % |
 
 The model amplifies float differences of about 1e-7 to a KLD of a few 1e-3, which the unfused engine also shows when only the batch size changes. The fusions
 therefore sit inside the engine's own numeric noise. Perplexity, fused vs unfused: 4.0842 vs 4.0802 (prompt path, 40 chunks, error +-0.09) and 3.9608 vs 3.9554

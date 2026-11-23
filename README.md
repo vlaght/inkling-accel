@@ -5,7 +5,7 @@
 
 Faster single-stream decoding of **Inkling 2 Mini** (Thinking Machines, 26B MoE, 3.4B active) on one 16 GB NVIDIA GPU with
 [llama.cpp](https://github.com/ggml-org/llama.cpp): CUDA kernel fusions (`patches/`), DSpark speculative decoding, and scripts that validate both.
-It works because decoding is bound by kernel launch count (about 7,300 small kernels per token), and the patches remove 46 % of them.
+It works because decoding is bound by kernel launch count (about 7,300 small kernels per token), and the patches remove 64 % of them.
 
 ## Result
 
@@ -15,16 +15,16 @@ Reproduce with `scripts/results-table.py`.
 
 | | decode tok/s (8-prompt mean) | prompt tok/s (6k prompt) |
 |---|---|---|
-| llama.cpp CUDA (patches switched off), the baseline | 65.3 (0 %) | 518 (0 %) |
-| CUDA + patches | **82.5** (+26.3 %) | **568** (+9.7 %) |
-| CUDA + patches + DSpark | **101.7** (+55.7 %) | 545 (+5.2 %) |
+| llama.cpp CUDA (patches switched off), the baseline | 65.2 (0 %) | 518 (0 %) |
+| CUDA + patches | **95.5** (+46.4 %) | **763** (+47.2 %) |
+| CUDA + patches + DSpark | **114.3** (+75.3 %) | 725 (+39.9 %) |
 
 Percentages are against the CUDA baseline row (llama.cpp with the patches switched off).
 
-Peak decode with `llama-bench` (`-ub 512`, f16 KV, no server) is 88.0 tok/s patched against 67.4 unpatched (+30.6 %); with a larger micro-batch the server reads prompts faster too
+Peak decode with `llama-bench` (`-ub 512`, f16 KV, no server) is 101.7 tok/s patched against 68.1 unpatched (+49.4 %; prompt 3,090 vs 1,895 tok/s, +63.0 %); with a larger micro-batch the server reads prompts faster too
 (688 tok/s at `-ub 128`, `docs/experiments.md` 5.7). The small micro-batch is what lets a 65k to 131k context fit.
 
-Quality: KL divergence against the unfused run is 0.0049, the same as the engine's own noise (0.0044 to 0.0047 when only the micro-batch changes).
+Quality: KL divergence against the unfused run is 0.0035 on the prompt path and 0.0028 on the decode path, below the engine's own noise (0.0044 to 0.0047 when only the micro-batch changes).
 
 ## Apply
 
@@ -57,7 +57,7 @@ a host compiler the toolkit accepts (for CUDA 13 use gcc 15 or older), git, cmak
    export ROOT=/path/to/llama.cpp MODEL=/path/to/Inkling-2-Mini-UD-IQ3_XXS.gguf DRAFT=/path/to/dspark-Inkling-2-Mini-Q8_0.gguf CUDA=/usr/local/cuda
    python3 /path/to/inkling-accel/scripts/validate.py bench
    ```
-   Expected: a table where "all fusions on" shows decode about +25 % and prompt about +15 % over "all fusions off". If it does, the patches work.
+   Expected: a table where "all fusions on" shows decode about +45 % and prompt about +60 % over "all fusions off". If it does, the patches work.
    `validate.py all` also checks quality (KL divergence), kernel launches per token, DSpark and a multi-turn session (about 30 minutes).
 6. **Serve** (OpenAI-compatible API with tool calling, DSpark on, 65,536-token context):
    ```
